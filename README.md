@@ -1,2 +1,2 @@
-# Group2Final
+# Final
 Crab data analysis final project 
