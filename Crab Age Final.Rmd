@@ -1,0 +1,144 @@
+---
+title: "Crab Age Prediction"
+author: "Sue Camara"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+  
+  '```{r setup, include=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(e1071)
+library(shiny)
+library(rmarkdown)
+library(corrplot)
+library(GGally)
+```
+
+## Data Import
+```{r data-import}
+Crab_Train <- read.csv("C:/Users/sueca/OneDrive/Desktop/Doing Data Science/beer data/Final/crab train.csv")
+Crab_Test <- read.csv("C:/Users/sueca/OneDrive/Desktop/Doing Data Science/beer data/Final/crab competition.csv")
+```
+
+## Data Exploration
+```{r data-exploration}
+summary(Crab_Train)
+colSums(is.na(Crab_Train))
+summary(Crab_Test)
+colSums(is.na(Crab_Test))
+```
+
+## Data Preparation
+```{r data-prep}
+Crab_Train$Sex <- as.factor(Crab_Train$Sex)
+Crab_Test$Sex <- as.factor(Crab_Test$Sex)
+
+Sex_Var_Train <- model.matrix(~ Sex -1, data = Crab_Train)
+Crab_Train_Hoten <- cbind(Crab_Train[, !names(Crab_Train) %in% "Sex"], Sex_Var_Train)
+
+Sex_Var_Test <- model.matrix(~ Sex -1, data = Crab_Test)
+Crab_Test_Hoten <- cbind(Crab_Test[, !names(Crab_Test) %in% "Sex"], Sex_Var_Test)
+
+numeric_vars <- Crab_Train_Hoten %>%
+  select(-Age, -id, -SexF, -SexI, -SexM) %>%
+  select(where(is.numeric)) %>%
+  names()
+
+preproc <- preProcess(Crab_Train_Hoten[, numeric_vars], method = c("center", "scale"))
+Crab_Train_Scaled <- Crab_Train_Hoten
+Crab_Train_Scaled[, numeric_vars] <- predict(preproc, Crab_Train_Hoten[, numeric_vars])
+
+names(Crab_Test_Hoten) <- gsub(" ", ".", names(Crab_Test_Hoten))
+Crab_Test_Scaled <- Crab_Test_Hoten
+Crab_Test_Scaled[, numeric_vars] <- predict(preproc, Crab_Test_Hoten[, numeric_vars])
+```
+
+## Exploratory Data Analysis
+```{r eda}
+Crab_Train_Scaled_for_plot <- Crab_Train_Scaled %>%
+  mutate(Sex = case_when(
+    SexF == 1 ~ "Female",
+    SexI == 1 ~ "Infant",
+    SexM == 1 ~ "Male"
+  ))
+
+ggplot(Crab_Train_Scaled_for_plot, aes(x = Sex, y = Age, fill = Sex)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.3, color = "black") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Female" = "#E69F00", "Infant" = "#56B4E9", "Male" = "#009E73")) +
+  labs(title = "Age Distribution by Sex", x = "Sex", y = "Age")
+
+important_vars <- c("Age", "Shell.Weight", "Height", "Diameter", "Length", "Weight", "Viscera.Weight")
+cor_matrix <- cor(Crab_Train_Scaled %>% select(all_of(important_vars)))
+corrplot(cor_matrix, method = "color", type = "upper")
+
+plot_data <- Crab_Train_Scaled_for_plot %>%
+  select(Age, Shell.Weight, Height, Length, Diameter) %>%
+  pivot_longer(cols = -Age, names_to = "Variable", values_to = "Value")
+
+ggplot(plot_data, aes(x = Value, y = Age)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  theme_minimal() +
+  labs(title = "Age vs Key Predictors", x = "Predictor Value", y = "Age")
+```
+
+## Model Training
+```{r model-training}
+set.seed(123)
+control <- trainControl(method = "cv", number = 5)
+
+model_lm <- train(Age ~ ., data = Crab_Train_Scaled %>% select(-id), method = "lm", metric = "MAE", trControl = control)
+model_rf <- train(Age ~ ., data = Crab_Train_Scaled %>% select(-id), method = "rf", metric = "MAE", tuneLength = 3, trControl = control)
+model_tree <- train(Age ~ ., data = Crab_Train_Scaled %>% select(-id), method = "rpart", metric = "MAE", tuneLength = 5, trControl = control)
+
+results <- resamples(list(Linear = model_lm, RF = model_rf, Tree = model_tree))
+summary(results)
+dotplot(results, metric = "MAE")
+```
+
+## Random Forest Tuning
+```{r rf-tuning}
+tune_grid <- expand.grid(mtry = c(2, 3, 4, 5, 6, 7))
+model_rf_tuned <- train(Age ~ ., data = Crab_Train_Scaled %>% select(-id), method = "rf", metric = "MAE", trControl = control, tuneGrid = tune_grid, ntree = 500)
+print(model_rf_tuned)
+plot(model_rf_tuned)
+```
+
+## Validation Plot
+```{r validation}
+split_index <- createDataPartition(Crab_Train_Scaled$Age, p = 0.8, list = FALSE)
+train_split <- Crab_Train_Scaled[split_index, ]
+valid_split <- Crab_Train_Scaled[-split_index, ]
+
+rf_val_model <- randomForest(Age ~ ., data = train_split %>% select(-id), mtry = 3, ntree = 500)
+pred_val <- predict(rf_val_model, newdata = valid_split)
+
+ggplot(data.frame(Actual = valid_split$Age, Predicted = pred_val), aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "#0072B2") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", size = 1) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Actual vs Predicted Age (Validation Set)", x = "Actual Age", y = "Predicted Age")
+```
+
+## Submission
+```{r submission}
+final_preds <- predict(model_rf_tuned, newdata = Crab_Test_Scaled)
+submission <- data.frame(ID = Crab_Test_Scaled$id, Age = final_preds)
+write.csv(submission, "crab_age_predictions_final_rf.csv", row.names = FALSE)
+```
+
+## Conclusion
+- Random Forest with `mtry = 3` gave the best performance.
+- Shell Weight, Length, and Diameter were strongest predictors.
+- Final predictions saved for competition submission.
+
+ 
